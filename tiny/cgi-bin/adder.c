@@ -42,7 +42,7 @@ int main(void) {
   sprintf(content, "%s<p>Thanks for visiting\r\n", content);
 
   printf("Connection: close\r\n");
-  printf("Content-length: %d\r\n", sizeof(content));
+  printf("Content-length: %d\r\n", (int)strlen(content));
   printf("content-type: text/html\r\n\r\n");
   if (strcmp(getenv("REQUEST_METHOD"), "GET") == 0) {
     printf("%s", content);

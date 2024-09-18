@@ -115,7 +115,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs) {
 
 void serve_static(int fd, char *filename, int filesize, char *method) {
   int srcfd, n, offset=0;
-  char *srcp, filetype[MAXLINE], buf[MAXLINE];
+  char *srcp, filetype[MAXLINE], buf[MAXBUF];
 
   get_filetype(filename, filetype);
   sprintf(buf, "HTTP/1.1 200 OK\r\n");
@@ -177,6 +177,8 @@ void get_filetype(char *filename, char *filetype) {
   // 11.7
   } else if (strstr(filename, ".mp4")) {
     strcpy(filetype, "application/mp4");
+  } else if (strstr(filename, ".mpeg")) {
+    strcpy(filetype, "video/mpeg");
   } else {
     strcpy(filetype, "text/plain");
   }
