@@ -10,75 +10,64 @@ static const char *user_agent_hdr =
     "Firefox/10.0.3\r\n";
 
 #include "csapp.h"
-#include "sbuf.h"
 
-
-#define NTHREADS 4
-#define SBUFSIZE 16
-
-typedef struct {
-    int *buf;
-    int n;
-    int front;
-    int rear;
-    sem_t mutex;
-    sem_t slots;
-    sem_t items;
-} sbuf_t;
-
-sbuf_t sbuf;
-
-void sbuf_init(sbuf_t *sp, int n);
-void sbuf_deinit(sbuf_t *sp);
-void sbuf_insert(sbuf_t *sp, int item);
-int sbuf_remove(sbuf_t *sp);
 void doit(int fd);
+// void read_requesthdrs(rio_t *rp);
 void read_requesthdrs(rio_t *rp, char *forward_buf);
+// int parse_uri(char *uri, char *filename, char *cgiargs);
 void parse_url(char *url, char *host, char *port, char *uri);
+// void serve_static(int fd, char *filename, int filesize);
+// void get_filetype(char *filename, char *filetype);
+// void serve_dynamic(int fd, char *filename, char *cgiargs);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg);
-void *thread(void *vargp);
+void sigchld_handler(int sig) {
+  int status;
+  pid_t pid;
+  while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+    if (WIFEXITED(status)){
+      printf("child process %d is reaped normally with exit status = %d\r\n\r\n", pid, WEXITSTATUS(status));
+    } else {
+      printf("child process %d is reaped abnormally\r\n\r\n", pid);
+    }
+  }
+  return;
+}
+
 
 int main(int argc, char **argv) {
   int listenfd, connfd;
   char hostname[MAXLINE], port[MAXLINE];
   socklen_t clientlen = sizeof(SA);
   struct sockaddr_storage clientaddr;
-  pthread_t tid;
 
   /* Check command line args */
   if (argc != 2) {
     fprintf(stderr, "usage: %s <port>\r\n", argv[0]);
     exit(1);
   }
-
+  Signal(SIGCHLD, sigchld_handler);
   listenfd = Open_listenfd(argv[1]);
-
-  sbuf_init(&sbuf, SBUFSIZE);
-  for (int i = 0; i < NTHREADS; i++) {
-    Pthread_create(&tid, NULL, thread, NULL);
-    printf("Thread %d is created for client service", tid);
-  }
-
   while (1) {
     connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);  // line:netp:tiny:accept
-    Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
-    printf("Accepted connection from (%s, %s)\r\n", hostname, port);
-    sbuf_insert(&sbuf, connfd);
-  }
-}
-
-void *thread(void *vargp) {
-  Pthread_detach(pthread_self());
-  while (1) {
-    int connfd = sbuf_remove(&sbuf);
-    doit(connfd);   // line:netp:tiny:doit
-    Close(connfd);  // line:netp:tiny:close
+    if (Fork() == 0) {
+      Close(listenfd);  // line:netp:tiny:close
+      Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
+      printf("Accepted connection from (%s, %s)\r\n", hostname, port);
+      doit(connfd);   // line:netp:tiny:doit
+      Close(connfd);  // line:netp:tiny:close
+      exit(0);
+    }
+    Close(connfd);
   }
 }
 
 void doit(int fd){
+  // int is_static;
+  // struct stat sbuf;
+  // char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
   char buf[MAXLINE], method[MAXLINE], url[MAXLINE], version[MAXLINE];
+  // char filename[MAXLINE], cgiargs[MAXLINE];
   char host[MAXLINE], port[MAXLINE], uri[MAXLINE], proxy_request[MAXLINE], proxy_buf[MAXLINE], forward_buf[MAXLINE];
   int proxy_fd, n;
   rio_t rio, proxy_rio;
@@ -193,35 +182,4 @@ void parse_url(char *url, char *host, char *port, char *uri) {
   printf("port: %s\r\n",port);
   printf("uri: %s\r\n\r\n",uri);
   return;
-}
-
-void sbuf_init(sbuf_t *sp, int n) {
-    sp->buf = Calloc(n, sizeof(int));
-    sp->n = n;
-    sp->front = sp->rear = 0;
-    Sem_init(&sp->mutex, 0, 1);
-    Sem_init(&sp->slots, 0, n);
-    Sem_init(&sp->items, 0, 0);
-}
-
-void sbuf_deinit(sbuf_t *sp) {
-    Free(sp->buf);
-}
-
-void sbuf_insert(sbuf_t *sp, int item) {
-    P(&sp->slots);
-    P(&sp->mutex);
-    sp->buf[(++sp->rear)%(sp->n)] = item;
-    V(&sp->mutex);
-    V(&sp->items);
-}
-
-int sbuf_remove(sbuf_t *sp) {
-    int item;
-    P(&sp->items);
-    P(&sp->mutex);
-    item = sp->buf[(++sp->front)%(sp->n)];
-    V(&sp->mutex);
-    V(&sp->slots);
-    return item;
 }
