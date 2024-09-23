@@ -5,6 +5,17 @@ static const char *user_agent_hdr =
     "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 "
     "Firefox/10.0.3\r\n";
 
+/* 
+ * For reviewers
+ * Concurrency는 prethread로 구현
+ * Caching 구현은 Pthread reader-writers lock을 이용한 Partitioning cache
+ * uri로 간단하게 hashing(DJB2 변형 - 17사용)한 index로 partition 선택하여 caching
+ * data 규모가 크지 않은 현재 테스트 환경에서 특정 partition에 몰릴 수 있음.
+ * Partition내에서 연결리스트로 구현되어있고 partition별로 rwlock
+ * cache_entry의 access_time field 수정 또한 write에 해당하지만 lock없이 업데이트(strict한 LRU x)
+ * Pthread reader-writer는 default가 reader를 선호하는데 writer선호로 attribute변경(line 242-246)
+ */
+
 int main(int argc, char **argv) {
   int listenfd, connfd;
   char hostname[MAXLINE], port[MAXLINE];
@@ -21,11 +32,13 @@ int main(int argc, char **argv) {
   listenfd = Open_listenfd(argv[1]);
   sbuf_init(&sbuf, SBUFSIZE);
 
+  // 노예 넷 소환
   for (int i = 0; i < NTHREADS; i++) {
     Pthread_create(&tid, NULL, thread, NULL);
     printf("Thread %lu is created for client service\r\n", tid);
   }
 
+  // cache initialization
   cache_init();
   printf("Proxy cache is initialized\r\n");
   printf("\r\n");
@@ -52,9 +65,7 @@ void doit(int fd){
   char host[MAXLINE], port[MAXLINE], uri[MAXLINE], forward_buf[MAXLINE];
   int proxy_fd;
   rio_t rio, proxy_rio;
-  // char *p, filesize[MAXLINE];
   char cache_size[MAXLINE], cache_type[MAXLINE], cache_object[MAX_OBJECT_SIZE];
-  // cache_entry *hit_entry;
 
   // 클라이언트로부터 요청라인request line을 읽습니다.
   Rio_readinitb(&rio, fd);
@@ -74,7 +85,7 @@ void doit(int fd){
 
 /*
  * cache로부터 uri를 찾습니다.
- * hit한 경우 cache_lookup이 response를 serve합니다.
+ * hit한 경우 cache_lookup이 response를 serve
  * response은 못 찾을 경우 NULL을 return 하고 계속 진행합니다.
  */
   if (cache_lookup(uri, fd)) {
@@ -95,7 +106,7 @@ void doit(int fd){
   forward_request(proxy_fd, host, uri, forward_buf);
 
   // Tiny로부터 response headers를 받아 Client로 전달합니다.
-  // caching을 위해 filesize와 filetype를 parsing합니다.
+  // caching을 위해 filesize와 filetype를 parsing.
   read_responsehdrs(&proxy_rio, fd, cache_size, cache_type);
 
   int cache_size_int = atoi(cache_size);
@@ -106,60 +117,13 @@ void doit(int fd){
   Rio_writen(fd, cache_object, cache_size_int);
   printf("response body served to client successfully\r\n\r\n");
 
-  // Cache에 추가
+  // 100KiB 이하면 Cache에 추가
   if (cache_size_int > MAX_OBJECT_SIZE) {
     printf("filesize is too large to caching in proxy\r\n\r\n");
   } else {
     cache_insert(uri, cache_object, cache_type, cache_size_int);
   }
-
   return;
-}
-
-void read_responsebodys(rio_t *rp, char *cache_object, int cache_size_int) {
-  printf("Start reading Response body\r\n");
-  Rio_readnb(rp, cache_object, cache_size_int);
-}
-
-void read_responsehdrs(rio_t *rp, int fd, char *cache_size, char *cache_type) {
-  char buf[MAXLINE];
-  char size[] = "Content-length: ";
-  char type[] = "Content-type: ";
-  int n;
-
-  printf("Forwarding Response headers:\r\n");
-  while ((n = Rio_readlineb(rp, buf, MAXLINE)) != 0) {
-    Rio_writen(fd, buf, n);
-    printf("%s", buf);
-    if (!strncmp(buf, size, strlen(size))) {
-      strcpy(cache_size, buf+strlen(size));
-      printf("filesize parsed for caching\r\n");
-    }
-    if (!strncmp(buf, type, strlen(type))) {
-      char *p = strchr(buf, '\r');
-      *p = '\0';
-      strcpy(cache_type, buf+strlen(type));
-      printf("filetype parsed for caching\r\n");
-    }
-    if (!strcmp(buf, "\r\n")) {
-      break;
-    }
-  }
-}
-
-void forward_request(int fd, char *host, char *uri, char *forward_buf) {
-  char buf[MAXLINE];
-
-  sprintf(buf, "GET %s HTTP/1.0\r\n", uri);
-  sprintf(buf, "%sHost: %s\r\n", buf, host);
-  sprintf(buf, "%s%s", buf, user_agent_hdr);
-  sprintf(buf, "%sConnection: close\r\n", buf);
-  sprintf(buf, "%sProxy-Connection: close\r\n", buf);
-  sprintf(buf, "%s%s", buf, forward_buf);
-  // sprintf(buf, "%s%s", buf, "\r\n");
-  Rio_writen(fd, buf, (int)strlen(buf));
-  printf("Proxy Request headers:\r\n");
-  printf("%s", buf);
 }
 
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg) {
@@ -177,30 +141,6 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longms
   sprintf(buf, "Content-length: %d\r\n\r\n", (int)strlen(body));
   Rio_writen(fd, buf, strlen(buf));
   Rio_writen(fd, body, (int)strlen(body));
-}
-
-void read_requesthdrs(rio_t *rp, char *forward_buf) {
-  char buf[MAXLINE], *preempted_header[] = {"Host:", "User-Agent:", "Connection:", "Proxy-Connection:", NULL};
-  int n;
-
-  while ((n = Rio_readlineb(rp, buf, MAXLINE)) != 0) {
-    // printf("%s", buf);
-    int should_skip = 0;  // 헤더를 스킵할지 여부
-    for (int i = 0; preempted_header[i] != NULL; i++) {
-        if (strncmp(buf, preempted_header[i], strlen(preempted_header[i])) == 0) {
-            should_skip = 1;  // 스킵해야 할 헤더임
-            break;
-        }
-    }
-    // 스킵하지 않을 경우에만 forward_buf에 추가
-    if (!should_skip) {
-        sprintf(forward_buf, "%s%s", forward_buf, buf);
-    }
-    if (!strcmp(buf, "\r\n")) {
-      break;
-    }
-  }
-  return;
 }
 
 void parse_url(char *url, char *host, char *port, char *uri) {
@@ -229,6 +169,76 @@ void parse_url(char *url, char *host, char *port, char *uri) {
   printf("port: %s\r\n",port);
   printf("uri: %s\r\n\r\n",uri);
   return;
+}
+
+void read_requesthdrs(rio_t *rp, char *forward_buf) {
+  char buf[MAXLINE], *preempted_header[] = {"Host:", "User-Agent:", "Connection:", "Proxy-Connection:", NULL};
+  int n;
+
+  while ((n = Rio_readlineb(rp, buf, MAXLINE)) != 0) {
+    // printf("%s", buf);
+    int should_skip = 0;  // 헤더를 스킵할지 여부
+    for (int i = 0; preempted_header[i] != NULL; i++) {
+        if (strncmp(buf, preempted_header[i], strlen(preempted_header[i])) == 0) {
+            should_skip = 1;  // 스킵해야 할 헤더임
+            break;
+        }
+    }
+    // 스킵하지 않을 경우에만 forward_buf에 추가
+    if (!should_skip) {
+        sprintf(forward_buf, "%s%s", forward_buf, buf);
+    }
+    if (!strcmp(buf, "\r\n")) {
+      break;
+    }
+  }
+  return;
+}
+
+void forward_request(int fd, char *host, char *uri, char *forward_buf) {
+  char buf[MAXLINE];
+
+  sprintf(buf, "GET %s HTTP/1.0\r\n", uri);
+  sprintf(buf, "%sHost: %s\r\n", buf, host);
+  sprintf(buf, "%s%s", buf, user_agent_hdr);
+  sprintf(buf, "%sConnection: close\r\n", buf);
+  sprintf(buf, "%sProxy-Connection: close\r\n", buf);
+  sprintf(buf, "%s%s", buf, forward_buf);
+  // sprintf(buf, "%s%s", buf, "\r\n");
+  Rio_writen(fd, buf, (int)strlen(buf));
+  printf("Proxy Request headers:\r\n");
+  printf("%s", buf);
+}
+
+void read_responsehdrs(rio_t *rp, int fd, char *cache_size, char *cache_type) {
+  char buf[MAXLINE];
+  char size[] = "Content-length: ";
+  char type[] = "Content-type: ";
+  int n;
+
+  printf("Forwarding Response headers:\r\n");
+  while ((n = Rio_readlineb(rp, buf, MAXLINE)) != 0) {
+    Rio_writen(fd, buf, n);
+    printf("%s", buf);
+    if (!strncmp(buf, size, strlen(size))) {
+      strcpy(cache_size, buf+strlen(size));
+      printf("filesize parsed for caching\r\n");
+    }
+    if (!strncmp(buf, type, strlen(type))) {
+      char *p = strchr(buf, '\r');
+      *p = '\0';
+      strcpy(cache_type, buf+strlen(type));
+      printf("filetype parsed for caching\r\n");
+    }
+    if (!strcmp(buf, "\r\n")) {
+      break;
+    }
+  }
+}
+
+void read_responsebodys(rio_t *rp, char *cache_object, int cache_size_int) {
+  printf("Start reading Response body\r\n");
+  Rio_readnb(rp, cache_object, cache_size_int);
 }
 
 void cache_init() {

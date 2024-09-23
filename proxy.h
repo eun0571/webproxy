@@ -8,12 +8,6 @@
 #include "sbuf.h"
 #include "cache.h"
 
-/*
- * cache로부터 uri를 찾습니다.
- * hit한 경우 cache_lookup이 response를 serve합니다.
- * response은 못 찾을 경우 NULL을 return 하고 계속 진행합니다.
- */
-
 #define NTHREADS 4
 #define SBUFSIZE 16
 #define NPARTITIONS 10
